@@ -83,7 +83,7 @@ async function run() {
   }
 
   if (isFreshRun) {
-    console.log("Fresh run detected. Clearing Logs and Tickets_Raw.");
+    console.log("Fresh run detected. Clearing old data but keeping headers.");
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId: SYSTEM_SHEET_ID,
@@ -92,7 +92,7 @@ async function run() {
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId: SYSTEM_SHEET_ID,
-      range: "Tickets_Raw!A:F"
+      range: "Tickets_Raw!A2:F"
     });
   }
 
@@ -257,7 +257,7 @@ async function run() {
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId: SYSTEM_SHEET_ID,
-      range: "Tickets_Raw!A:F"
+      range: "Tickets_Raw!A2:F"
     });
 
     await log("Export Complete", "FINAL", totalFetched, totalSaved, "DONE");
