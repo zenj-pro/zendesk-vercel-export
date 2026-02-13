@@ -87,7 +87,7 @@ async function run() {
 
     await sheets.spreadsheets.values.clear({
       spreadsheetId: SYSTEM_SHEET_ID,
-      range: "Logs!A:G"
+      range: "Logs!A2:G"
     });
 
     await sheets.spreadsheets.values.clear({
