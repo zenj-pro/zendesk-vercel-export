@@ -1,10 +1,10 @@
 {
-  "name": "zendesk-vercel-export",
+  "name": "zendesk-monthly-export",
   "version": "1.0.0",
-  "private": true,
+  "type": "module",
   "dependencies": {
-    "xlsx": "^0.18.5",
+    "googleapis": "^133.0.0",
     "nodemailer": "^6.9.8",
-    "googleapis": "^132.0.0"
+    "node-fetch": "^3.3.2"
   }
 }
