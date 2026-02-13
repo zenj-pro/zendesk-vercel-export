@@ -1,5 +1,9 @@
 {
   "name": "zendesk-vercel-export",
   "version": "1.0.0",
-  "private": true
+  "private": true,
+  "dependencies": {
+    "xlsx": "^0.18.5",
+    "nodemailer": "^6.9.8"
+  }
 }
