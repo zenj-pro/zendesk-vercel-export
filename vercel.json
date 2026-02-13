@@ -1,0 +1,8 @@
+{
+  "crons": [
+    {
+      "path": "/api/run-export?month=2025-12",
+      "schedule": "*/1 * * * *"
+    }
+  ]
+}
