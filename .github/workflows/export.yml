@@ -2,8 +2,12 @@ name: Zendesk Monthly Export
 
 on:
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "0 2 1 * *"   # Runs at 02:00 UTC on the 1st of every month
   workflow_dispatch:
+    inputs:
+      month:
+        description: "Month to export (YYYY-MM)"
+        required: false
 
 jobs:
   run-export:
@@ -20,7 +24,7 @@ jobs:
 
       - run: node export.js
         env:
-          EXPORT_MONTH: 2025-12
+          EXPORT_MONTH: ${{ github.event.inputs.month }}
           ZENDESK_SUBDOMAIN: ${{ secrets.ZENDESK_SUBDOMAIN }}
           ZENDESK_EMAIL: ${{ secrets.ZENDESK_EMAIL }}
           ZENDESK_API_TOKEN: ${{ secrets.ZENDESK_API_TOKEN }}
