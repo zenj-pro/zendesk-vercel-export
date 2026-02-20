@@ -193,10 +193,6 @@ async function run() {
 
   await log("Export workbook created.");
 
-  /* --------------------------
-     EMAIL
-  --------------------------- */
-
   if (RECIPIENTS.length > 0) {
     const transporter = nodemailer.createTransport({
       service: "gmail",
