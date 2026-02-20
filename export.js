@@ -55,12 +55,14 @@ const RECIPIENTS = process.env.EMAIL_RECIPIENTS
 
 async function log(message) {
   const timestamp = new Date().toISOString();
+
   await sheets.spreadsheets.values.append({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Logs!A:B",
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [[timestamp, message]] }
   });
+
   console.log(message);
 }
 
@@ -72,6 +74,35 @@ async function run() {
 
   await log(`Starting export for ${monthStr}`);
 
+  /* --------------------------
+     CLEAR SHEET + HEADER
+  --------------------------- */
+
+  await sheets.spreadsheets.values.clear({
+    spreadsheetId: SYSTEM_SHEET_ID,
+    range: "Tickets_Raw!A:F"
+  });
+
+  await log("Cleared Tickets_Raw sheet.");
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SYSTEM_SHEET_ID,
+    range: "Tickets_Raw!A1",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        "Ticket ID",
+        "Created At",
+        "Requester Email",
+        "Channel",
+        "Subject",
+        "All Public Comments"
+      ]]
+    }
+  });
+
+  await log("Inserted header row.");
+
   const authHeader = Buffer.from(
     `${process.env.ZENDESK_EMAIL}:${process.env.ZENDESK_API_TOKEN}`
   ).toString("base64");
@@ -80,18 +111,14 @@ async function run() {
 
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
-    const dayStart = new Date(d);
-    const dayEnd = new Date(d);
-    dayEnd.setHours(23, 59, 59, 999);
+    const day = new Date(d);
+    const dateStr = day.toISOString().split("T")[0];
 
-    const startDate = dayStart.toISOString().split("T")[0];
-    const endDate = dayStart.toISOString().split("T")[0];
-
-    await log(`Processing day: ${startDate}`);
+    await log(`Processing day: ${dateStr}`);
 
     let url =
       `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
-      `?query=type:ticket created>=${startDate} created<=${endDate}` +
+      `?query=type:ticket created>=${dateStr} created<=${dateStr}` +
       `&sort_by=created_at&sort_order=asc`;
 
     while (url) {
@@ -101,7 +128,7 @@ async function run() {
       });
 
       if (response.status === 429) {
-        await log("Rate limited. Waiting 60s...");
+        await log("Rate limited. Waiting 60 seconds...");
         await new Promise(r => setTimeout(r, 60000));
         continue;
       }
@@ -168,7 +195,7 @@ async function run() {
         });
 
         totalSaved += rows.length;
-        await log(`Saved ${rows.length} tickets for ${startDate}. Total so far: ${totalSaved}`);
+        await log(`Saved ${rows.length} tickets for ${dateStr}. Total so far: ${totalSaved}`);
       }
 
       url = data.next_page;
