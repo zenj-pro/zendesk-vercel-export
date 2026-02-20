@@ -1,28 +1,31 @@
 name: Zendesk Monthly Export
 
 on:
-  schedule:
-    - cron: "0 2 1 * *"   # Runs at 02:00 UTC on the 1st of every month
   workflow_dispatch:
     inputs:
       month:
-        description: "Month to export (YYYY-MM)"
-        required: false
+        description: "Month to export (YYYY-MM). Example: 2025-12"
+        required: true
+        type: string
 
 jobs:
   run-export:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node
+        uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      - run: npm install
+      - name: Install dependencies
+        run: npm install
 
-      - run: node export.js
+      - name: Run Export
+        run: node export.js
         env:
           EXPORT_MONTH: ${{ github.event.inputs.month }}
           ZENDESK_SUBDOMAIN: ${{ secrets.ZENDESK_SUBDOMAIN }}
