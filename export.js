@@ -1,6 +1,5 @@
 import fetch from "node-fetch";
 import { google } from "googleapis";
-import nodemailer from "nodemailer";
 
 /* --------------------------
    MONTH HANDLING
@@ -36,18 +35,12 @@ const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
 const auth = new google.auth.GoogleAuth({
   credentials: creds,
   scopes: [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/spreadsheets"
   ]
 });
 
 const sheets = google.sheets({ version: "v4", auth });
-const drive = google.drive({ version: "v3", auth });
-
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
-const RECIPIENTS = process.env.EMAIL_RECIPIENTS
-  ? process.env.EMAIL_RECIPIENTS.split(",")
-  : [];
 
 /* --------------------------
    LOGGER
@@ -160,12 +153,12 @@ async function run() {
 
         const commentsRes = await fetch(
           `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket.id}/comments.json`,
-          { headers: { Authorization: `Basic ${authHeader}` }
-        });
+          { headers: { Authorization: `Basic ${authHeader}` } }
+        );
 
         const commentsData = await commentsRes.json();
 
-        const publicComments = (commentsData.comments || [])
+        let publicComments = (commentsData.comments || [])
           .filter(c => c.public)
           .map(c => {
             const role =
@@ -176,14 +169,40 @@ async function run() {
           })
           .join("\n\n---\n\n");
 
-        rows.push([
-          ticket.id,
-          ticket.created_at,
-          requesterEmail,
-          ticket.via?.channel || "",
-          ticket.subject || "",
-          publicComments
-        ]);
+        const MAX_CELL_LENGTH = 49000;
+
+        if (publicComments.length > MAX_CELL_LENGTH) {
+
+          const totalParts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
+
+          for (let i = 0; i < totalParts; i++) {
+            const chunk = publicComments.substring(
+              i * MAX_CELL_LENGTH,
+              (i + 1) * MAX_CELL_LENGTH
+            );
+
+            rows.push([
+              ticket.id,
+              ticket.created_at,
+              requesterEmail,
+              ticket.via?.channel || "",
+              ticket.subject || "",
+              `Part ${i + 1}/${totalParts}\n\n${chunk}`
+            ]);
+          }
+
+        } else {
+
+          rows.push([
+            ticket.id,
+            ticket.created_at,
+            requesterEmail,
+            ticket.via?.channel || "",
+            ticket.subject || "",
+            publicComments
+          ]);
+
+        }
       }
 
       if (rows.length > 0) {
@@ -195,15 +214,14 @@ async function run() {
         });
 
         totalSaved += rows.length;
-        await log(`Saved ${rows.length} tickets for ${dateStr}. Total so far: ${totalSaved}`);
+        await log(`Saved ${rows.length} rows for ${dateStr}. Total so far: ${totalSaved}`);
       }
 
       url = data.next_page;
     }
   }
 
-  await log(`Finished month. Total saved: ${totalSaved}`);
-
+  await log(`Finished month. Total rows saved: ${totalSaved}`);
   await log("Export complete.");
 }
 
