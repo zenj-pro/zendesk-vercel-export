@@ -1,5 +1,6 @@
 import fetch from "node-fetch";
 import { google } from "googleapis";
+import nodemailer from "nodemailer";
 
 /* --------------------------
    MONTH HANDLING
@@ -35,12 +36,18 @@ const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
 const auth = new google.auth.GoogleAuth({
   credentials: creds,
   scopes: [
-    "https://www.googleapis.com/auth/spreadsheets"
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/drive"
   ]
 });
 
 const sheets = google.sheets({ version: "v4", auth });
+const drive = google.drive({ version: "v3", auth });
+
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+const RECIPIENTS = process.env.EMAIL_RECIPIENTS
+  ? process.env.EMAIL_RECIPIENTS.split(",")
+  : [];
 
 /* --------------------------
    LOGGER
@@ -48,14 +55,12 @@ const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
 async function log(message) {
   const timestamp = new Date().toISOString();
-
   await sheets.spreadsheets.values.append({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Logs!A:B",
     valueInputOption: "USER_ENTERED",
     requestBody: { values: [[timestamp, message]] }
   });
-
   console.log(message);
 }
 
@@ -67,16 +72,10 @@ async function run() {
 
   await log(`Starting export for ${monthStr}`);
 
-  /* --------------------------
-     CLEAR SHEET + HEADER
-  --------------------------- */
-
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A:F"
   });
-
-  await log("Cleared Tickets_Raw sheet.");
 
   await sheets.spreadsheets.values.update({
     spreadsheetId: SYSTEM_SHEET_ID,
@@ -94,8 +93,6 @@ async function run() {
     }
   });
 
-  await log("Inserted header row.");
-
   const authHeader = Buffer.from(
     `${process.env.ZENDESK_EMAIL}:${process.env.ZENDESK_API_TOKEN}`
   ).toString("base64");
@@ -104,9 +101,7 @@ async function run() {
 
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
-    const day = new Date(d);
-    const dateStr = day.toISOString().split("T")[0];
-
+    const dateStr = d.toISOString().split("T")[0];
     await log(`Processing day: ${dateStr}`);
 
     let url =
@@ -120,15 +115,8 @@ async function run() {
         headers: { Authorization: `Basic ${authHeader}` }
       });
 
-      if (response.status === 429) {
-        await log("Rate limited. Waiting 60 seconds...");
-        await new Promise(r => setTimeout(r, 60000));
-        continue;
-      }
-
       if (!response.ok) {
-        const text = await response.text();
-        throw new Error(text);
+        throw new Error(await response.text());
       }
 
       const data = await response.json();
@@ -172,27 +160,21 @@ async function run() {
         const MAX_CELL_LENGTH = 49000;
 
         if (publicComments.length > MAX_CELL_LENGTH) {
-
-          const totalParts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
-
-          for (let i = 0; i < totalParts; i++) {
-            const chunk = publicComments.substring(
-              i * MAX_CELL_LENGTH,
-              (i + 1) * MAX_CELL_LENGTH
-            );
-
+          const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
+          for (let i = 0; i < parts; i++) {
             rows.push([
               ticket.id,
               ticket.created_at,
               requesterEmail,
               ticket.via?.channel || "",
               ticket.subject || "",
-              `Part ${i + 1}/${totalParts}\n\n${chunk}`
+              `Part ${i + 1}/${parts}\n\n${publicComments.substring(
+                i * MAX_CELL_LENGTH,
+                (i + 1) * MAX_CELL_LENGTH
+              )}`
             ]);
           }
-
         } else {
-
           rows.push([
             ticket.id,
             ticket.created_at,
@@ -201,7 +183,6 @@ async function run() {
             ticket.subject || "",
             publicComments
           ]);
-
         }
       }
 
@@ -214,15 +195,69 @@ async function run() {
         });
 
         totalSaved += rows.length;
-        await log(`Saved ${rows.length} rows for ${dateStr}. Total so far: ${totalSaved}`);
+        await log(`Saved ${rows.length}. Total so far: ${totalSaved}`);
       }
 
       url = data.next_page;
     }
   }
 
-  await log(`Finished month. Total rows saved: ${totalSaved}`);
-  await log("Export complete.");
+  await log(`Month complete. Total rows: ${totalSaved}`);
+
+  /* --------------------------
+     CREATE EXPORT FILE
+  --------------------------- */
+
+  const file = await drive.files.create({
+    requestBody: {
+      name: `zendesk_herohq_${monthStr.replace("-", "_")}`,
+      mimeType: "application/vnd.google-apps.spreadsheet"
+    }
+  });
+
+  const exportId = file.data.id;
+
+  const rawData = await sheets.spreadsheets.values.get({
+    spreadsheetId: SYSTEM_SHEET_ID,
+    range: "Tickets_Raw!A:F"
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: exportId,
+    range: "A1",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: rawData.data.values
+    }
+  });
+
+  for (const email of RECIPIENTS) {
+    await drive.permissions.create({
+      fileId: exportId,
+      requestBody: {
+        role: "writer",
+        type: "user",
+        emailAddress: email
+      }
+    });
+  }
+
+  const transporter = nodemailer.createTransport({
+    service: "gmail",
+    auth: {
+      user: process.env.GMAIL_SENDER,
+      pass: process.env.GMAIL_APP_PASSWORD
+    }
+  });
+
+  await transporter.sendMail({
+    from: process.env.GMAIL_SENDER,
+    to: RECIPIENTS,
+    subject: `Zendesk Monthly Report - ${monthStr}`,
+    text: `Export ready:\nhttps://docs.google.com/spreadsheets/d/${exportId}`
+  });
+
+  await log("Export file created and emailed successfully.");
 }
 
 run().catch(async err => {
