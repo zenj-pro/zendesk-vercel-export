@@ -50,6 +50,32 @@ const RECIPIENTS = process.env.EMAIL_RECIPIENTS
   : [];
 
 /* --------------------------
+   SAFE FETCH HELPER
+--------------------------- */
+
+async function safeFetchJson(url, headers) {
+  const response = await fetch(url, { headers });
+
+  if (response.status === 429) {
+    console.log("Rate limited. Waiting 60 seconds...");
+    await new Promise(r => setTimeout(r, 60000));
+    return safeFetchJson(url, headers);
+  }
+
+  const text = await response.text();
+
+  if (!response.ok) {
+    throw new Error(`Zendesk API error: ${text}`);
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(`Invalid JSON response: ${text.substring(0, 200)}`);
+  }
+}
+
+/* --------------------------
    LOGGER
 --------------------------- */
 
@@ -111,15 +137,10 @@ async function run() {
 
     while (url) {
 
-      const response = await fetch(url, {
-        headers: { Authorization: `Basic ${authHeader}` }
+      const data = await safeFetchJson(url, {
+        Authorization: `Basic ${authHeader}`
       });
 
-      if (!response.ok) {
-        throw new Error(await response.text());
-      }
-
-      const data = await response.json();
       const tickets = data.results || [];
 
       if (tickets.length === 0) break;
@@ -131,36 +152,47 @@ async function run() {
         let requesterEmail = "N/A";
 
         if (ticket.requester_id) {
-          const userRes = await fetch(
-            `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/users/${ticket.requester_id}.json`,
-            { headers: { Authorization: `Basic ${authHeader}` } }
-          );
-          const userData = await userRes.json();
-          requesterEmail = userData.user?.email || "N/A";
+          try {
+            const userData = await safeFetchJson(
+              `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/users/${ticket.requester_id}.json`,
+              { Authorization: `Basic ${authHeader}` }
+            );
+            requesterEmail = userData.user?.email || "N/A";
+          } catch (err) {
+            await log(`User lookup failed for ${ticket.id}`);
+          }
         }
 
-        const commentsRes = await fetch(
-          `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket.id}/comments.json`,
-          { headers: { Authorization: `Basic ${authHeader}` } }
-        );
+        let publicComments = "";
 
-        const commentsData = await commentsRes.json();
+        try {
+          const commentsData = await safeFetchJson(
+            `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket.id}/comments.json`,
+            { Authorization: `Basic ${authHeader}` }
+          );
 
-        let publicComments = (commentsData.comments || [])
-          .filter(c => c.public)
-          .map(c => {
-            const role =
-              c.author_id === ticket.requester_id
-                ? "**Requester:**"
-                : "**Agent:**";
-            return `${role} ${c.body}`;
-          })
-          .join("\n\n---\n\n");
+          publicComments = (commentsData.comments || [])
+            .filter(c => c.public)
+            .map(c => {
+              const role =
+                c.author_id === ticket.requester_id
+                  ? "**Requester:**"
+                  : "**Agent:**";
+              return `${role} ${c.body}`;
+            })
+            .join("\n\n---\n\n");
+
+        } catch (err) {
+          await log(`Comment fetch failed for ticket ${ticket.id}`);
+          publicComments = "Comment retrieval failed.";
+        }
 
         const MAX_CELL_LENGTH = 49000;
 
         if (publicComments.length > MAX_CELL_LENGTH) {
+
           const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
+
           for (let i = 0; i < parts; i++) {
             rows.push([
               ticket.id,
@@ -174,7 +206,9 @@ async function run() {
               )}`
             ]);
           }
+
         } else {
+
           rows.push([
             ticket.id,
             ticket.created_at,
@@ -183,6 +217,7 @@ async function run() {
             ticket.subject || "",
             publicComments
           ]);
+
         }
       }
 
@@ -226,9 +261,7 @@ async function run() {
     spreadsheetId: exportId,
     range: "A1",
     valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: rawData.data.values
-    }
+    requestBody: { values: rawData.data.values }
   });
 
   for (const email of RECIPIENTS) {
@@ -262,6 +295,6 @@ async function run() {
 
 run().catch(async err => {
   console.error("ERROR:", err.message);
-  await log(`ERROR: ${err.message}`);
+  await log(`FATAL ERROR: ${err.message}`);
   process.exit(1);
 });
