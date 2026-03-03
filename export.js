@@ -128,12 +128,10 @@ async function run() {
     nextDay.setDate(nextDay.getDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
-    await log(`Processing day: ${dateStr}`);
-
-    let url =
-      `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
-      `?query=type:ticket via.channel:messaging created>=${dateStr} created<${nextDateStr}` +
-      `&sort_by=created_at&sort_order=asc`;
+let url =
+  `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
+  `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
+  `&sort_by=created_at&sort_order=asc`;
 
     while (url) {
 
