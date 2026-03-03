@@ -238,6 +238,8 @@ async function run() {
   }
 
   await log(`Month complete. Total rows: ${totalSaved}`);
+   
+   await log(`Folder ID used: ${process.env.EXPORT_FOLDER_ID}`);
 
   /* --------------------------
      CREATE EXPORT FILE
