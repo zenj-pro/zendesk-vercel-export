@@ -106,7 +106,7 @@ async function run() {
       values: [[
         "Ticket ID",
         "Created At",
-        "Requester Email",
+        "Requester ID",
         "Channel",
         "Subject",
         "All Public Comments"
@@ -128,10 +128,12 @@ async function run() {
     nextDay.setDate(nextDay.getDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
-let url =
-  `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
-  `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
-  `&sort_by=created_at&sort_order=asc`;
+    await log(`Processing day: ${dateStr}`);
+
+    let url =
+      `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
+      `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
+      `&sort_by=created_at&sort_order=asc`;
 
     while (url) {
 
@@ -144,21 +146,7 @@ let url =
 
       let rows = [];
 
-      for (const ticket of tickets) {
-
-        let requesterEmail = "N/A";
-
-        if (ticket.requester_id) {
-          try {
-            const userData = await safeFetchJson(
-              `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/users/${ticket.requester_id}.json`,
-              { Authorization: `Basic ${authHeader}` }
-            );
-            requesterEmail = userData.user?.email || "N/A";
-          } catch {
-            await log(`User lookup failed for ${ticket.id}`);
-          }
-        }
+      const ticketPromises = tickets.map(async (ticket) => {
 
         let publicComments = "";
 
@@ -180,21 +168,21 @@ let url =
             .join("\n\n---\n\n");
 
         } catch {
-          await log(`Comment fetch failed for ticket ${ticket.id}`);
           publicComments = "Comment retrieval failed.";
         }
 
         const MAX_CELL_LENGTH = 49000;
+        let ticketRows = [];
 
         if (publicComments.length > MAX_CELL_LENGTH) {
 
           const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
 
           for (let i = 0; i < parts; i++) {
-            rows.push([
+            ticketRows.push([
               ticket.id,
               ticket.created_at,
-              requesterEmail,
+              ticket.requester_id || "",
               ticket.via?.channel || "",
               ticket.subject || "",
               `Part ${i + 1}/${parts}\n\n${publicComments.substring(
@@ -206,17 +194,21 @@ let url =
 
         } else {
 
-          rows.push([
+          ticketRows.push([
             ticket.id,
             ticket.created_at,
-            requesterEmail,
+            ticket.requester_id || "",
             ticket.via?.channel || "",
             ticket.subject || "",
             publicComments
           ]);
-
         }
-      }
+
+        return ticketRows;
+      });
+
+      const results = await Promise.all(ticketPromises);
+      rows.push(...results.flat());
 
       if (rows.length > 0) {
         await sheets.spreadsheets.values.append({
