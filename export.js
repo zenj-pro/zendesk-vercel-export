@@ -243,12 +243,13 @@ async function run() {
      CREATE EXPORT FILE
   --------------------------- */
 
-  const file = await drive.files.create({
-    requestBody: {
-      name: `zendesk_herohq_${monthStr.replace("-", "_")}`,
-      mimeType: "application/vnd.google-apps.spreadsheet"
-    }
-  });
+ const file = await drive.files.create({
+  requestBody: {
+    name: `zendesk_herohq_${monthStr.replace("-", "_")}`,
+    mimeType: "application/vnd.google-apps.spreadsheet",
+    parents: [process.env.EXPORT_FOLDER_ID]
+  }
+});
 
   const exportId = file.data.id;
 
