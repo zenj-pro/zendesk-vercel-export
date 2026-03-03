@@ -164,7 +164,7 @@ async function run() {
               publicComments = "Comment retrieval failed.";
             }
 
-            const MAX_CELL_LENGTH = 49000;
+            const MAX_CELL_LENGTH = 48000;
             let ticketRows = [];
 
             if (publicComments.length > MAX_CELL_LENGTH) {
@@ -172,16 +172,18 @@ async function run() {
               const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
 
               for (let p = 0; p < parts; p++) {
+                const chunk = publicComments.substring(
+                  p * MAX_CELL_LENGTH,
+                  (p + 1) * MAX_CELL_LENGTH
+                );
+
                 ticketRows.push([
                   ticket.id,
                   ticket.created_at,
                   ticket.requester_id || "",
                   ticket.via?.channel || "",
                   ticket.subject || "",
-                  `Part ${p + 1}/${parts}\n\n${publicComments.substring(
-                    p * MAX_CELL_LENGTH,
-                    (p + 1) * MAX_CELL_LENGTH
-                  )}`
+                  `Part ${p + 1}/${parts}\n\n${chunk}`
                 ]);
               }
 
@@ -203,7 +205,6 @@ async function run() {
 
         rows.push(...results.flat());
 
-        // small throttle between batches
         await new Promise(r => setTimeout(r, 1000));
       }
 
