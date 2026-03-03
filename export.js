@@ -49,7 +49,7 @@ const RECIPIENTS = process.env.EMAIL_RECIPIENTS
   : [];
 
 /* --------------------------
-   SAFE FETCH WITH RATE LIMIT
+   SAFE FETCH
 --------------------------- */
 
 async function safeFetchJson(url, headers) {
@@ -132,7 +132,6 @@ async function run() {
 
       let rows = [];
 
-      // 🔥 BATCHED processing to avoid rate limits
       const BATCH_SIZE = 5;
 
       for (let i = 0; i < tickets.length; i += BATCH_SIZE) {
@@ -165,20 +164,46 @@ async function run() {
               publicComments = "Comment retrieval failed.";
             }
 
-            return [
-              ticket.id,
-              ticket.created_at,
-              ticket.requester_id || "",
-              ticket.via?.channel || "",
-              ticket.subject || "",
-              publicComments
-            ];
+            const MAX_CELL_LENGTH = 49000;
+            let ticketRows = [];
+
+            if (publicComments.length > MAX_CELL_LENGTH) {
+
+              const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
+
+              for (let p = 0; p < parts; p++) {
+                ticketRows.push([
+                  ticket.id,
+                  ticket.created_at,
+                  ticket.requester_id || "",
+                  ticket.via?.channel || "",
+                  ticket.subject || "",
+                  `Part ${p + 1}/${parts}\n\n${publicComments.substring(
+                    p * MAX_CELL_LENGTH,
+                    (p + 1) * MAX_CELL_LENGTH
+                  )}`
+                ]);
+              }
+
+            } else {
+
+              ticketRows.push([
+                ticket.id,
+                ticket.created_at,
+                ticket.requester_id || "",
+                ticket.via?.channel || "",
+                ticket.subject || "",
+                publicComments
+              ]);
+            }
+
+            return ticketRows;
           })
         );
 
-        rows.push(...results);
+        rows.push(...results.flat());
 
-        // small throttle
+        // small throttle between batches
         await new Promise(r => setTimeout(r, 1000));
       }
 
@@ -230,7 +255,7 @@ async function run() {
   console.log("Export file size:", fileBuffer.length);
 
   /* --------------------------
-     EMAIL FILE
+     EMAIL
   --------------------------- */
 
   const transporter = nodemailer.createTransport({
