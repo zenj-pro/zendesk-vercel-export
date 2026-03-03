@@ -93,13 +93,11 @@ async function run() {
 
   await log(`Starting export for ${monthStr}`);
 
-  // Clear existing data
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A:F"
   });
 
-  // Add header row
   await sheets.spreadsheets.values.update({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A1",
@@ -125,11 +123,16 @@ async function run() {
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
     const dateStr = d.toISOString().split("T")[0];
+
+    const nextDay = new Date(d);
+    nextDay.setDate(nextDay.getDate() + 1);
+    const nextDateStr = nextDay.toISOString().split("T")[0];
+
     await log(`Processing day: ${dateStr}`);
 
     let url =
       `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
-      `?query=type:ticket channel:messaging created>=${dateStr} created<=${dateStr}` +
+      `?query=type:ticket via.channel:messaging created>=${dateStr} created<${nextDateStr}` +
       `&sort_by=created_at&sort_order=asc`;
 
     while (url) {
@@ -279,6 +282,5 @@ async function run() {
 
 run().catch(async err => {
   console.error("ERROR:", err.message);
-  await log(`FATAL ERROR: ${err.message}`);
   process.exit(1);
 });
