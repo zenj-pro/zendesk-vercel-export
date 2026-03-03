@@ -78,13 +78,11 @@ async function run() {
 
   console.log(`Starting export for ${monthStr}`);
 
-  // Clear sheet
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:F"
+    range: "Tickets_Raw!A:G"
   });
 
-  // Header row
   await sheets.spreadsheets.values.update({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A1",
@@ -96,7 +94,8 @@ async function run() {
         "Requester ID",
         "Channel",
         "Subject",
-        "All Public Comments"
+        "Comment Author Type",
+        "Comment Body"
       ]]
     }
   });
@@ -141,65 +140,37 @@ async function run() {
         const results = await Promise.all(
           batch.map(async (ticket) => {
 
-            let publicComments = "";
-
             try {
+
               const commentsData = await safeFetchJson(
                 `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket.id}/comments.json`,
                 { Authorization: `Basic ${authHeader}` }
               );
 
-              publicComments = (commentsData.comments || [])
-                .filter(c => c.public)
-                .map(c => {
-                  const role =
-                    c.author_id === ticket.requester_id
-                      ? "Requester:"
-                      : "Agent:";
-                  return `${role} ${c.body}`;
-                })
-                .join("\n\n---\n\n");
+              const publicComments = (commentsData.comments || [])
+                .filter(c => c.public);
 
-            } catch {
-              publicComments = "Comment retrieval failed.";
-            }
-
-            const MAX_CELL_LENGTH = 48000;
-            let ticketRows = [];
-
-            if (publicComments.length > MAX_CELL_LENGTH) {
-
-              const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
-
-              for (let p = 0; p < parts; p++) {
-                const chunk = publicComments.substring(
-                  p * MAX_CELL_LENGTH,
-                  (p + 1) * MAX_CELL_LENGTH
-                );
-
-                ticketRows.push([
-                  ticket.id,
-                  ticket.created_at,
-                  ticket.requester_id || "",
-                  ticket.via?.channel || "",
-                  ticket.subject || "",
-                  `Part ${p + 1}/${parts}\n\n${chunk}`
-                ]);
-              }
-
-            } else {
-
-              ticketRows.push([
+              return publicComments.map(c => [
                 ticket.id,
                 ticket.created_at,
                 ticket.requester_id || "",
                 ticket.via?.channel || "",
                 ticket.subject || "",
-                publicComments
+                c.author_id === ticket.requester_id ? "Requester" : "Agent",
+                c.body
               ]);
-            }
 
-            return ticketRows;
+            } catch {
+              return [[
+                ticket.id,
+                ticket.created_at,
+                ticket.requester_id || "",
+                ticket.via?.channel || "",
+                ticket.subject || "",
+                "System",
+                "Comment retrieval failed."
+              ]];
+            }
           })
         );
 
@@ -211,7 +182,7 @@ async function run() {
       if (rows.length > 0) {
         await sheets.spreadsheets.values.append({
           spreadsheetId: SYSTEM_SHEET_ID,
-          range: "Tickets_Raw!A:F",
+          range: "Tickets_Raw!A:G",
           valueInputOption: "USER_ENTERED",
           requestBody: { values: rows }
         });
@@ -254,10 +225,6 @@ async function run() {
   const fileBuffer = Buffer.from(arrayBuffer);
 
   console.log("Export file size:", fileBuffer.length);
-
-  /* --------------------------
-     EMAIL
-  --------------------------- */
 
   const transporter = nodemailer.createTransport({
     service: "gmail",
