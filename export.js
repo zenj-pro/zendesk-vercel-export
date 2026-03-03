@@ -42,15 +42,14 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const sheets = google.sheets({ version: "v4", auth });
-const drive = google.drive({ version: "v3", auth });
-
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
+
 const RECIPIENTS = process.env.EMAIL_RECIPIENTS
   ? process.env.EMAIL_RECIPIENTS.split(",")
   : [];
 
 /* --------------------------
-   SAFE FETCH HELPER
+   SAFE FETCH
 --------------------------- */
 
 async function safeFetchJson(url, headers) {
@@ -68,11 +67,7 @@ async function safeFetchJson(url, headers) {
     throw new Error(`Zendesk API error: ${text}`);
   }
 
-  try {
-    return JSON.parse(text);
-  } catch (err) {
-    throw new Error(`Invalid JSON response: ${text.substring(0, 200)}`);
-  }
+  return JSON.parse(text);
 }
 
 /* --------------------------
@@ -98,11 +93,13 @@ async function run() {
 
   await log(`Starting export for ${monthStr}`);
 
+  // Clear existing data
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A:F"
   });
 
+  // Add header row
   await sheets.spreadsheets.values.update({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A1",
@@ -130,10 +127,10 @@ async function run() {
     const dateStr = d.toISOString().split("T")[0];
     await log(`Processing day: ${dateStr}`);
 
-  let url =
-  `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
-  `?query=type:ticket channel:messaging created>=${dateStr} created<=${dateStr}` +
-  `&sort_by=created_at&sort_order=asc`;
+    let url =
+      `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
+      `?query=type:ticket channel:messaging created>=${dateStr} created<=${dateStr}` +
+      `&sort_by=created_at&sort_order=asc`;
 
     while (url) {
 
@@ -142,7 +139,6 @@ async function run() {
       });
 
       const tickets = data.results || [];
-
       if (tickets.length === 0) break;
 
       let rows = [];
@@ -158,7 +154,7 @@ async function run() {
               { Authorization: `Basic ${authHeader}` }
             );
             requesterEmail = userData.user?.email || "N/A";
-          } catch (err) {
+          } catch {
             await log(`User lookup failed for ${ticket.id}`);
           }
         }
@@ -176,13 +172,13 @@ async function run() {
             .map(c => {
               const role =
                 c.author_id === ticket.requester_id
-                  ? "**Requester:**"
-                  : "**Agent:**";
+                  ? "Requester:"
+                  : "Agent:";
               return `${role} ${c.body}`;
             })
             .join("\n\n---\n\n");
 
-        } catch (err) {
+        } catch {
           await log(`Comment fetch failed for ticket ${ticket.id}`);
           publicComments = "Comment retrieval failed.";
         }
@@ -238,45 +234,24 @@ async function run() {
   }
 
   await log(`Month complete. Total rows: ${totalSaved}`);
-   
-   await log(`Folder ID used: ${process.env.EXPORT_FOLDER_ID}`);
 
   /* --------------------------
-     CREATE EXPORT FILE
+     EXPORT AS EXCEL + EMAIL
   --------------------------- */
 
- const file = await drive.files.create({
-  requestBody: {
-    name: `zendesk_herohq_${monthStr.replace("-", "_")}`,
-    mimeType: "application/vnd.google-apps.spreadsheet",
-    parents: [process.env.EXPORT_FOLDER_ID]
-  }
-});
+  const accessToken = await auth.getAccessToken();
 
-  const exportId = file.data.id;
+  const exportUrl =
+    `https://www.googleapis.com/drive/v3/files/${SYSTEM_SHEET_ID}/export` +
+    `?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
 
-  const rawData = await sheets.spreadsheets.values.get({
-    spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:F"
+  const exportResponse = await fetch(exportUrl, {
+    headers: {
+      Authorization: `Bearer ${accessToken.token}`
+    }
   });
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: exportId,
-    range: "A1",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: rawData.data.values }
-  });
-
-  for (const email of RECIPIENTS) {
-    await drive.permissions.create({
-      fileId: exportId,
-      requestBody: {
-        role: "writer",
-        type: "user",
-        emailAddress: email
-      }
-    });
-  }
+  const fileBuffer = await exportResponse.buffer();
 
   const transporter = nodemailer.createTransport({
     service: "gmail",
@@ -290,10 +265,16 @@ async function run() {
     from: process.env.GMAIL_SENDER,
     to: RECIPIENTS,
     subject: `Zendesk Monthly Report - ${monthStr}`,
-    text: `Export ready:\nhttps://docs.google.com/spreadsheets/d/${exportId}`
+    text: `Attached is the Zendesk monthly export.`,
+    attachments: [
+      {
+        filename: `zendesk_herohq_${monthStr.replace("-", "_")}.xlsx`,
+        content: fileBuffer
+      }
+    ]
   });
 
-  await log("Export file created and emailed successfully.");
+  await log("Export emailed successfully.");
 }
 
 run().catch(async err => {
