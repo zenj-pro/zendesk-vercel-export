@@ -49,15 +49,15 @@ const RECIPIENTS = process.env.EMAIL_RECIPIENTS
   : [];
 
 /* --------------------------
-   SAFE FETCH
+   SAFE FETCH WITH RATE LIMIT
 --------------------------- */
 
 async function safeFetchJson(url, headers) {
   const response = await fetch(url, { headers });
 
   if (response.status === 429) {
-    console.log("Rate limited. Waiting 60 seconds...");
-    await new Promise(r => setTimeout(r, 60000));
+    console.log("Rate limited. Waiting 10 seconds...");
+    await new Promise(r => setTimeout(r, 10000));
     return safeFetchJson(url, headers);
   }
 
@@ -71,33 +71,20 @@ async function safeFetchJson(url, headers) {
 }
 
 /* --------------------------
-   LOGGER
---------------------------- */
-
-async function log(message) {
-  const timestamp = new Date().toISOString();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Logs!A:B",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [[timestamp, message]] }
-  });
-  console.log(message);
-}
-
-/* --------------------------
    MAIN
 --------------------------- */
 
 async function run() {
 
-  await log(`Starting export for ${monthStr}`);
+  console.log(`Starting export for ${monthStr}`);
 
+  // Clear sheet
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A:F"
   });
 
+  // Header row
   await sheets.spreadsheets.values.update({
     spreadsheetId: SYSTEM_SHEET_ID,
     range: "Tickets_Raw!A1",
@@ -123,12 +110,11 @@ async function run() {
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
     const dateStr = d.toISOString().split("T")[0];
-
     const nextDay = new Date(d);
     nextDay.setDate(nextDay.getDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
-    await log(`Processing day: ${dateStr}`);
+    console.log("Processing day:", dateStr);
 
     let url =
       `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
@@ -146,69 +132,55 @@ async function run() {
 
       let rows = [];
 
-      const ticketPromises = tickets.map(async (ticket) => {
+      // 🔥 BATCHED processing to avoid rate limits
+      const BATCH_SIZE = 5;
 
-        let publicComments = "";
+      for (let i = 0; i < tickets.length; i += BATCH_SIZE) {
 
-        try {
-          const commentsData = await safeFetchJson(
-            `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket.id}/comments.json`,
-            { Authorization: `Basic ${authHeader}` }
-          );
+        const batch = tickets.slice(i, i + BATCH_SIZE);
 
-          publicComments = (commentsData.comments || [])
-            .filter(c => c.public)
-            .map(c => {
-              const role =
-                c.author_id === ticket.requester_id
-                  ? "Requester:"
-                  : "Agent:";
-              return `${role} ${c.body}`;
-            })
-            .join("\n\n---\n\n");
+        const results = await Promise.all(
+          batch.map(async (ticket) => {
 
-        } catch {
-          publicComments = "Comment retrieval failed.";
-        }
+            let publicComments = "";
 
-        const MAX_CELL_LENGTH = 49000;
-        let ticketRows = [];
+            try {
+              const commentsData = await safeFetchJson(
+                `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket.id}/comments.json`,
+                { Authorization: `Basic ${authHeader}` }
+              );
 
-        if (publicComments.length > MAX_CELL_LENGTH) {
+              publicComments = (commentsData.comments || [])
+                .filter(c => c.public)
+                .map(c => {
+                  const role =
+                    c.author_id === ticket.requester_id
+                      ? "Requester:"
+                      : "Agent:";
+                  return `${role} ${c.body}`;
+                })
+                .join("\n\n---\n\n");
 
-          const parts = Math.ceil(publicComments.length / MAX_CELL_LENGTH);
+            } catch {
+              publicComments = "Comment retrieval failed.";
+            }
 
-          for (let i = 0; i < parts; i++) {
-            ticketRows.push([
+            return [
               ticket.id,
               ticket.created_at,
               ticket.requester_id || "",
               ticket.via?.channel || "",
               ticket.subject || "",
-              `Part ${i + 1}/${parts}\n\n${publicComments.substring(
-                i * MAX_CELL_LENGTH,
-                (i + 1) * MAX_CELL_LENGTH
-              )}`
-            ]);
-          }
+              publicComments
+            ];
+          })
+        );
 
-        } else {
+        rows.push(...results);
 
-          ticketRows.push([
-            ticket.id,
-            ticket.created_at,
-            ticket.requester_id || "",
-            ticket.via?.channel || "",
-            ticket.subject || "",
-            publicComments
-          ]);
-        }
-
-        return ticketRows;
-      });
-
-      const results = await Promise.all(ticketPromises);
-      rows.push(...results.flat());
+        // small throttle
+        await new Promise(r => setTimeout(r, 1000));
+      }
 
       if (rows.length > 0) {
         await sheets.spreadsheets.values.append({
@@ -219,20 +191,22 @@ async function run() {
         });
 
         totalSaved += rows.length;
-        await log(`Saved ${rows.length}. Total so far: ${totalSaved}`);
+        console.log(`Saved ${rows.length}. Total so far: ${totalSaved}`);
       }
 
       url = data.next_page;
     }
   }
 
-  await log(`Month complete. Total rows: ${totalSaved}`);
+  console.log(`Month complete. Total rows: ${totalSaved}`);
 
   /* --------------------------
-     EXPORT AS EXCEL + EMAIL
+     EXPORT EXCEL
   --------------------------- */
 
-  const accessToken = await auth.getAccessToken();
+  const client = await auth.getClient();
+  const accessTokenObj = await client.getAccessToken();
+  const accessToken = accessTokenObj.token;
 
   const exportUrl =
     `https://www.googleapis.com/drive/v3/files/${SYSTEM_SHEET_ID}/export` +
@@ -240,11 +214,24 @@ async function run() {
 
   const exportResponse = await fetch(exportUrl, {
     headers: {
-      Authorization: `Bearer ${accessToken.token}`
+      Authorization: `Bearer ${accessToken}`
     }
   });
 
-  const fileBuffer = await exportResponse.buffer();
+  if (!exportResponse.ok) {
+    const errorText = await exportResponse.text();
+    console.error("Drive export error:", errorText);
+    throw new Error("Drive export failed");
+  }
+
+  const arrayBuffer = await exportResponse.arrayBuffer();
+  const fileBuffer = Buffer.from(arrayBuffer);
+
+  console.log("Export file size:", fileBuffer.length);
+
+  /* --------------------------
+     EMAIL FILE
+  --------------------------- */
 
   const transporter = nodemailer.createTransport({
     service: "gmail",
@@ -267,10 +254,10 @@ async function run() {
     ]
   });
 
-  await log("Export emailed successfully.");
+  console.log("Export emailed successfully.");
 }
 
-run().catch(async err => {
-  console.error("ERROR:", err.message);
+run().catch(err => {
+  console.error("FATAL ERROR:", err.message);
   process.exit(1);
 });
