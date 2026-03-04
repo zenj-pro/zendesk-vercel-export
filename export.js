@@ -72,7 +72,7 @@ async function safeFetchJson(url, headers) {
 }
 
 /* --------------------------
-   BYTE SPLIT SAFE
+   BYTE SAFE SPLITTER
 --------------------------- */
 
 function splitByBytes(str, maxBytes) {
@@ -116,7 +116,7 @@ async function run() {
     requestBody: {
       values: [[
         "Ticket ID",
-        "Created At",
+        "Created at",
         "Requester Email",
         "Channel",
         "Subject",
@@ -194,7 +194,6 @@ async function run() {
         });
 
         const combined = formatted.join("\n\n---\n\n");
-
         const chunks = splitByBytes(combined, MAX_BYTES);
 
         for (let p = 0; p < chunks.length; p++) {
