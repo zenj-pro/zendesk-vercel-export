@@ -105,6 +105,7 @@ async function run() {
   ).toString("base64");
 
   let totalSaved = 0;
+  const MAX_CELL = 48000;
 
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
@@ -130,7 +131,6 @@ async function run() {
       if (tickets.length === 0) break;
 
       let rows = [];
-
       const BATCH_SIZE = 5;
 
       for (let i = 0; i < tickets.length; i += BATCH_SIZE) {
@@ -150,17 +150,57 @@ async function run() {
               const publicComments = (commentsData.comments || [])
                 .filter(c => c.public);
 
-              return publicComments.map(c => [
-                ticket.id,
-                ticket.created_at,
-                ticket.requester_id || "",
-                ticket.via?.channel || "",
-                ticket.subject || "",
-                c.author_id === ticket.requester_id ? "Requester" : "Agent",
-                c.body
-              ]);
+              let expandedRows = [];
+
+              for (const c of publicComments) {
+
+                const authorType =
+                  c.author_id === ticket.requester_id
+                    ? "Requester"
+                    : "Agent";
+
+                const body = c.body || "";
+
+                if (body.length <= MAX_CELL) {
+
+                  expandedRows.push([
+                    ticket.id,
+                    ticket.created_at,
+                    ticket.requester_id || "",
+                    ticket.via?.channel || "",
+                    ticket.subject || "",
+                    authorType,
+                    body
+                  ]);
+
+                } else {
+
+                  const parts = Math.ceil(body.length / MAX_CELL);
+
+                  for (let p = 0; p < parts; p++) {
+
+                    const chunk = body.substring(
+                      p * MAX_CELL,
+                      (p + 1) * MAX_CELL
+                    );
+
+                    expandedRows.push([
+                      ticket.id,
+                      ticket.created_at,
+                      ticket.requester_id || "",
+                      ticket.via?.channel || "",
+                      ticket.subject || "",
+                      `${authorType} (Part ${p + 1}/${parts})`,
+                      chunk
+                    ]);
+                  }
+                }
+              }
+
+              return expandedRows;
 
             } catch {
+
               return [[
                 ticket.id,
                 ticket.created_at,
@@ -180,6 +220,7 @@ async function run() {
       }
 
       if (rows.length > 0) {
+
         await sheets.spreadsheets.values.append({
           spreadsheetId: SYSTEM_SHEET_ID,
           range: "Tickets_Raw!A:G",
