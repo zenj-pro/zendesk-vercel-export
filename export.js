@@ -71,12 +71,39 @@ async function safeFetchJson(url, headers) {
 }
 
 /* --------------------------
+   BYTE SAFE SPLITTER
+--------------------------- */
+
+function splitByBytes(str, maxBytes) {
+  const chunks = [];
+  let current = "";
+  let currentBytes = 0;
+
+  for (const char of str) {
+    const charBytes = Buffer.byteLength(char, "utf8");
+
+    if (currentBytes + charBytes > maxBytes) {
+      chunks.push(current);
+      current = char;
+      currentBytes = charBytes;
+    } else {
+      current += char;
+      currentBytes += charBytes;
+    }
+  }
+
+  if (current) chunks.push(current);
+
+  return chunks;
+}
+
+/* --------------------------
    MAIN
 --------------------------- */
 
 async function run() {
 
-  console.log(`Starting export for ${monthStr}`);
+  console.log("BYTE SAFE VERSION ACTIVE");
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
@@ -105,7 +132,7 @@ async function run() {
   ).toString("base64");
 
   let totalSaved = 0;
-  const MAX_CELL = 48000;
+  const MAX_BYTES = 48000;
 
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
@@ -147,8 +174,8 @@ async function run() {
                 { Authorization: `Basic ${authHeader}` }
               );
 
-              const publicComments = (commentsData.comments || [])
-                .filter(c => c.public);
+              const publicComments =
+                (commentsData.comments || []).filter(c => c.public);
 
               let expandedRows = [];
 
@@ -161,7 +188,9 @@ async function run() {
 
                 const body = c.body || "";
 
-                if (body.length <= MAX_CELL) {
+                const chunks = splitByBytes(body, MAX_BYTES);
+
+                for (let p = 0; p < chunks.length; p++) {
 
                   expandedRows.push([
                     ticket.id,
@@ -169,31 +198,9 @@ async function run() {
                     ticket.requester_id || "",
                     ticket.via?.channel || "",
                     ticket.subject || "",
-                    authorType,
-                    body
+                    `${authorType} (Part ${p + 1}/${chunks.length})`,
+                    chunks[p]
                   ]);
-
-                } else {
-
-                  const parts = Math.ceil(body.length / MAX_CELL);
-
-                  for (let p = 0; p < parts; p++) {
-
-                    const chunk = body.substring(
-                      p * MAX_CELL,
-                      (p + 1) * MAX_CELL
-                    );
-
-                    expandedRows.push([
-                      ticket.id,
-                      ticket.created_at,
-                      ticket.requester_id || "",
-                      ticket.via?.channel || "",
-                      ticket.subject || "",
-                      `${authorType} (Part ${p + 1}/${parts})`,
-                      chunk
-                    ]);
-                  }
                 }
               }
 
@@ -258,8 +265,7 @@ async function run() {
 
   if (!exportResponse.ok) {
     const errorText = await exportResponse.text();
-    console.error("Drive export error:", errorText);
-    throw new Error("Drive export failed");
+    throw new Error(`Drive export failed: ${errorText}`);
   }
 
   const arrayBuffer = await exportResponse.arrayBuffer();
