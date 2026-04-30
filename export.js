@@ -132,6 +132,8 @@ async function run() {
   let totalSaved = 0;
   const MAX_BYTES = 48000;
 
+  const EXCLUDED_CHANNELS = ["messaging", "native_messaging"];
+
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
     const dateStr = d.toISOString().split("T")[0];
@@ -159,11 +161,15 @@ async function run() {
 
       for (const ticket of tickets) {
 
+        const channel = ticket.via?.channel || "";
+
+        // ❌ Skip messaging completely
+        if (EXCLUDED_CHANNELS.includes(channel)) continue;
+
         const ticket_id = ticket.id;
         const created = ticket.created_at;
         const subject = ticket.subject || "";
         const requester_id = ticket.requester_id;
-        const channel = ticket.via?.channel || "";
 
         // Get requester email
         let requester_email = "N/A";
@@ -197,7 +203,6 @@ async function run() {
         const chunks = splitByBytes(combined, MAX_BYTES);
 
         for (let p = 0; p < chunks.length; p++) {
-
           rows.push([
             ticket_id,
             created,
