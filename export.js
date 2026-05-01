@@ -143,6 +143,8 @@ async function run() {
     nextDay.setDate(nextDay.getDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
+    console.log("Processing day:", dateStr);
+
     let url =
       `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
       `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
@@ -157,68 +159,67 @@ async function run() {
       const tickets = data.results || [];
       if (tickets.length === 0) break;
 
+      console.log(`Processing ${tickets.length} tickets`);
+
       let rows = [];
 
-      for (const ticket of tickets) {
+      await Promise.all(
+        tickets.map(async (ticket) => {
 
-        const channel = ticket.via?.channel || "";
-        if (EXCLUDED_CHANNELS.includes(channel)) continue;
+          const channel = ticket.via?.channel || "";
+          if (EXCLUDED_CHANNELS.includes(channel)) return;
 
-        const ticket_id = ticket.id;
-        const created = ticket.created_at;
-        const subject = ticket.subject || "";
-        const requester_id = ticket.requester_id;
+          const ticket_id = ticket.id;
+          const created = ticket.created_at;
+          const subject = ticket.subject || "";
 
-        let requester_email = "N/A";
-        try {
-          const userData = await safeFetchJson(
-            `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/users/${requester_id}.json`,
-            { Authorization: `Basic ${authHeader}` }
-          );
-          requester_email = userData.user?.email || "N/A";
-        } catch {}
+          // ✅ FAST replacement (no API call)
+          const requester_email =
+            ticket.via?.source?.from?.address ||
+            ticket.requester_id ||
+            "N/A";
 
-        let publicComments = [];
-        try {
-          const commentsData = await safeFetchJson(
-            `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket_id}/comments.json`,
-            { Authorization: `Basic ${authHeader}` }
-          );
-          publicComments = (commentsData.comments || []).filter(c => c.public);
-        } catch {}
+          let publicComments = [];
+          try {
+            const commentsData = await safeFetchJson(
+              `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket_id}/comments.json`,
+              { Authorization: `Basic ${authHeader}` }
+            );
+            publicComments = (commentsData.comments || []).filter(c => c.public);
+          } catch {}
 
-        const formatted = publicComments.map(c => {
-          const role =
-            c.author_id === requester_id
-              ? "**Requester:**"
-              : "**Agent:**";
-          return `${role} ${c.body}`;
-        });
+          const formatted = publicComments.map(c => {
+            const role =
+              c.author_id === ticket.requester_id
+                ? "**Requester:**"
+                : "**Agent:**";
+            return `${role} ${c.body}`;
+          });
 
-        const combined = formatted.join("\n\n---\n\n");
-        const chunks = splitByBytes(combined, MAX_BYTES);
+          const combined = formatted.join("\n\n---\n\n");
+          const chunks = splitByBytes(combined, MAX_BYTES);
 
-        for (let p = 0; p < chunks.length; p++) {
+          for (let p = 0; p < chunks.length; p++) {
 
-          // ✅ FIX: prevent 50k cell crash
-          const safeCombined =
-            combined && combined.length > 49000
-              ? combined.slice(0, 49000) + "\n\n[Truncated]"
-              : combined;
+            const safeCombined =
+              combined && combined.length > 49000
+                ? combined.slice(0, 49000) + "\n\n[Truncated]"
+                : combined;
 
-          rows.push([
-            ticket_id,
-            created,
-            requester_email,
-            channel,
-            subject,
-            safeCombined,
-            chunks.length > 1
-              ? `Part ${p + 1}/${chunks.length}\n\n${chunks[p]}`
-              : chunks[p]
-          ]);
-        }
-      }
+            rows.push([
+              ticket_id,
+              created,
+              requester_email,
+              channel,
+              subject,
+              safeCombined,
+              chunks.length > 1
+                ? `Part ${p + 1}/${chunks.length}\n\n${chunks[p]}`
+                : chunks[p]
+            ]);
+          }
+        })
+      );
 
       if (rows.length > 0) {
         await sheets.spreadsheets.values.append({
@@ -229,6 +230,7 @@ async function run() {
         });
 
         totalSaved += rows.length;
+        console.log(`Saved ${rows.length}, total: ${totalSaved}`);
       }
 
       url = data.next_page;
@@ -256,7 +258,6 @@ async function run() {
 
   const values = source.data.values || [];
 
-  // ✅ FILTER: remove broken rows
   const cleanedValues = values.filter((row, index) => {
     if (index === 0) return true;
 
