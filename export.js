@@ -173,7 +173,6 @@ async function run() {
           const created = ticket.created_at;
           const subject = ticket.subject || "";
 
-          // ✅ FAST replacement (no API call)
           const requester_email =
             ticket.via?.source?.from?.address ||
             ticket.requester_id ||
@@ -295,6 +294,8 @@ async function run() {
   const client = await auth.getClient();
   const accessToken = (await client.getAccessToken()).token;
 
+  await new Promise(r => setTimeout(r, 2000)); // ✅ stability delay
+
   const exportUrl =
     `https://www.googleapis.com/drive/v3/files/${tempId}/export` +
     `?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
@@ -325,8 +326,6 @@ async function run() {
       content: fileBuffer
     }]
   });
-
-  await drive.files.delete({ fileId: tempId });
 
   console.log("Export emailed successfully.");
 }
