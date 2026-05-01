@@ -199,14 +199,23 @@ async function run() {
         const chunks = splitByBytes(combined, MAX_BYTES);
 
         for (let p = 0; p < chunks.length; p++) {
+
+          // ✅ FIX: prevent 50k cell crash
+          const safeCombined =
+            combined && combined.length > 49000
+              ? combined.slice(0, 49000) + "\n\n[Truncated]"
+              : combined;
+
           rows.push([
             ticket_id,
             created,
             requester_email,
             channel,
             subject,
-            combined,
-            chunks[p]
+            safeCombined,
+            chunks.length > 1
+              ? `Part ${p + 1}/${chunks.length}\n\n${chunks[p]}`
+              : chunks[p]
           ]);
         }
       }
@@ -229,7 +238,7 @@ async function run() {
   console.log(`Month complete. Total rows: ${totalSaved}`);
 
   /* --------------------------
-     CREATE CLEAN EXPORT
+     CLEAN EXPORT
   --------------------------- */
 
   const temp = await sheets.spreadsheets.create({
@@ -247,7 +256,7 @@ async function run() {
 
   const values = source.data.values || [];
 
-  // ✅ FILTER LOGIC
+  // ✅ FILTER: remove broken rows
   const cleanedValues = values.filter((row, index) => {
     if (index === 0) return true;
 
