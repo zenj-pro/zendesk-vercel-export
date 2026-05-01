@@ -3,7 +3,7 @@ import { google } from "googleapis";
 import nodemailer from "nodemailer";
 
 /* --------------------------
-   MONTH HANDLING
+   MONTH HANDLING (UNCHANGED)
 --------------------------- */
 
 function getPreviousMonth() {
@@ -42,6 +42,8 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const sheets = google.sheets({ version: "v4", auth });
+const drive = google.drive({ version: "v3", auth });
+
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
 const RECIPIENTS = process.env.EMAIL_RECIPIENTS
@@ -57,7 +59,6 @@ async function safeFetchJson(url, headers) {
 
   if (response.status === 429) {
     const retry = parseInt(response.headers.get("retry-after") || "60");
-    console.log(`Rate limited. Waiting ${retry}s...`);
     await new Promise(r => setTimeout(r, retry * 1000));
     return safeFetchJson(url, headers);
   }
@@ -106,7 +107,7 @@ async function run() {
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:F"
+    range: "Tickets_Raw!A:G"
   });
 
   await sheets.spreadsheets.values.update({
@@ -120,7 +121,8 @@ async function run() {
         "Requester Email",
         "Channel",
         "Subject",
-        "All Public Comments"
+        "All Public Comments",
+        "Comment Body"
       ]]
     }
   });
@@ -141,8 +143,6 @@ async function run() {
     nextDay.setDate(nextDay.getDate() + 1);
     const nextDateStr = nextDay.toISOString().split("T")[0];
 
-    console.log("Processing day:", dateStr);
-
     let url =
       `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
       `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
@@ -162,8 +162,6 @@ async function run() {
       for (const ticket of tickets) {
 
         const channel = ticket.via?.channel || "";
-
-        // ❌ Skip messaging completely
         if (EXCLUDED_CHANNELS.includes(channel)) continue;
 
         const ticket_id = ticket.id;
@@ -171,7 +169,6 @@ async function run() {
         const subject = ticket.subject || "";
         const requester_id = ticket.requester_id;
 
-        // Get requester email
         let requester_email = "N/A";
         try {
           const userData = await safeFetchJson(
@@ -181,7 +178,6 @@ async function run() {
           requester_email = userData.user?.email || "N/A";
         } catch {}
 
-        // Get comments
         let publicComments = [];
         try {
           const commentsData = await safeFetchJson(
@@ -209,9 +205,8 @@ async function run() {
             requester_email,
             channel,
             subject,
-            chunks.length > 1
-              ? `Part ${p + 1}/${chunks.length}\n\n${chunks[p]}`
-              : chunks[p]
+            combined,
+            chunks[p]
           ]);
         }
       }
@@ -219,13 +214,12 @@ async function run() {
       if (rows.length > 0) {
         await sheets.spreadsheets.values.append({
           spreadsheetId: SYSTEM_SHEET_ID,
-          range: "Tickets_Raw!A:F",
+          range: "Tickets_Raw!A:G",
           valueInputOption: "USER_ENTERED",
           requestBody: { values: rows }
         });
 
         totalSaved += rows.length;
-        console.log(`Saved ${rows.length}. Total so far: ${totalSaved}`);
       }
 
       url = data.next_page;
@@ -234,22 +228,74 @@ async function run() {
 
   console.log(`Month complete. Total rows: ${totalSaved}`);
 
-  /* EXPORT EXCEL */
+  /* --------------------------
+     CREATE CLEAN EXPORT
+  --------------------------- */
+
+  const temp = await sheets.spreadsheets.create({
+    requestBody: {
+      properties: { title: `zendesk_herohq_${monthStr.replace("-", "_")}` }
+    }
+  });
+
+  const tempId = temp.data.spreadsheetId;
+
+  const source = await sheets.spreadsheets.values.get({
+    spreadsheetId: SYSTEM_SHEET_ID,
+    range: "Tickets_Raw!A:G"
+  });
+
+  const values = source.data.values || [];
+
+  // ✅ FILTER LOGIC
+  const cleanedValues = values.filter((row, index) => {
+    if (index === 0) return true;
+
+    const [id, created, email, channel, subject, allComments, commentBody] = row;
+
+    const isMainEmpty =
+      !id && !created && !email && !channel && !subject && !allComments;
+
+    const hasOnlyG = isMainEmpty && commentBody;
+
+    return !hasOnlyG;
+  });
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: tempId,
+    range: "Sheet1!A1",
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: cleanedValues }
+  });
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: tempId,
+    requestBody: {
+      requests: [{
+        updateSheetProperties: {
+          properties: { sheetId: 0, title: monthStr.replace("-", "_") },
+          fields: "title"
+        }
+      }]
+    }
+  });
+
+  /* EXPORT */
 
   const client = await auth.getClient();
-  const accessTokenObj = await client.getAccessToken();
-  const accessToken = accessTokenObj.token;
+  const accessToken = (await client.getAccessToken()).token;
 
   const exportUrl =
-    `https://www.googleapis.com/drive/v3/files/${SYSTEM_SHEET_ID}/export` +
+    `https://www.googleapis.com/drive/v3/files/${tempId}/export` +
     `?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
 
-  const exportResponse = await fetch(exportUrl, {
+  const res = await fetch(exportUrl, {
     headers: { Authorization: `Bearer ${accessToken}` }
   });
 
-  const arrayBuffer = await exportResponse.arrayBuffer();
-  const fileBuffer = Buffer.from(arrayBuffer);
+  const fileBuffer = Buffer.from(await res.arrayBuffer());
+
+  /* EMAIL */
 
   const transporter = nodemailer.createTransport({
     service: "gmail",
@@ -264,13 +310,13 @@ async function run() {
     to: RECIPIENTS,
     subject: `Zendesk Monthly Report - ${monthStr}`,
     text: "Attached is this month’s Zendesk export.",
-    attachments: [
-      {
-        filename: `zendesk_herohq_${monthStr.replace("-", "_")}.xlsx`,
-        content: fileBuffer
-      }
-    ]
+    attachments: [{
+      filename: `zendesk_herohq_${monthStr.replace("-", "_")}.xlsx`,
+      content: fileBuffer
+    }]
   });
+
+  await drive.files.delete({ fileId: tempId });
 
   console.log("Export emailed successfully.");
 }
