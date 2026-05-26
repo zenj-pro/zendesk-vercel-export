@@ -42,6 +42,7 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const sheets = google.sheets({ version: "v4", auth });
+const drive = google.drive({ version: "v3", auth });
 
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
@@ -212,6 +213,16 @@ async function run() {
   });
 
   const tempId = temp.data.spreadsheetId;
+
+  // ✅ FINAL FIX: Grant permission
+  await drive.permissions.create({
+    fileId: tempId,
+    requestBody: {
+      role: "writer",
+      type: "user",
+      emailAddress: creds.client_email
+    }
+  });
 
   const source = await sheets.spreadsheets.values.get({
     spreadsheetId: SYSTEM_SHEET_ID,
