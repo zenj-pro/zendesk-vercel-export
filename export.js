@@ -1,6 +1,7 @@
 import fetch from "node-fetch";
 import { google } from "googleapis";
 import nodemailer from "nodemailer";
+import XLSX from "xlsx";
 
 /* --------------------------
    MONTH HANDLING
@@ -36,13 +37,11 @@ const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
 const auth = new google.auth.GoogleAuth({
   credentials: creds,
   scopes: [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+    "https://www.googleapis.com/auth/spreadsheets"
   ]
 });
 
 const sheets = google.sheets({ version: "v4", auth });
-const drive = google.drive({ version: "v3", auth });
 
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
@@ -203,26 +202,8 @@ async function run() {
   console.log(`Month complete. Total rows: ${totalSaved}`);
 
   /* --------------------------
-     CLEAN EXPORT
+     BUILD EXCEL DIRECTLY
   --------------------------- */
-
-  const temp = await sheets.spreadsheets.create({
-    requestBody: {
-      properties: { title: `zendesk_herohq_${monthStr.replace("-", "_")}` }
-    }
-  });
-
-  const tempId = temp.data.spreadsheetId;
-
-  // ✅ FINAL FIX: Grant permission
-  await drive.permissions.create({
-    fileId: tempId,
-    requestBody: {
-      role: "writer",
-      type: "user",
-      emailAddress: creds.client_email
-    }
-  });
 
   const source = await sheets.spreadsheets.values.get({
     spreadsheetId: SYSTEM_SHEET_ID,
@@ -242,38 +223,23 @@ async function run() {
     return !isEmpty;
   });
 
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: tempId,
-    range: "Sheet1!A1",
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: cleanedValues }
+  const worksheet = XLSX.utils.aoa_to_sheet(cleanedValues);
+  const workbook = XLSX.utils.book_new();
+
+  XLSX.utils.book_append_sheet(
+    workbook,
+    worksheet,
+    monthStr.replace("-", "_")
+  );
+
+  const fileBuffer = XLSX.write(workbook, {
+    type: "buffer",
+    bookType: "xlsx"
   });
 
-  await sheets.spreadsheets.batchUpdate({
-    spreadsheetId: tempId,
-    requestBody: {
-      requests: [{
-        updateSheetProperties: {
-          properties: { sheetId: 0, title: monthStr.replace("-", "_") },
-          fields: "title"
-        }
-      }]
-    }
-  });
-
-  /* EXPORT */
-
-  const client = await auth.getClient();
-
-  const res = await client.request({
-    url: `https://docs.google.com/spreadsheets/d/${tempId}/export`,
-    params: { format: "xlsx" },
-    responseType: "arraybuffer"
-  });
-
-  const fileBuffer = Buffer.from(res.data);
-
-  /* EMAIL */
+  /* --------------------------
+     EMAIL
+  --------------------------- */
 
   const transporter = nodemailer.createTransport({
     service: "gmail",
