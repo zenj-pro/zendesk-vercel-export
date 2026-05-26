@@ -3,7 +3,7 @@ import { google } from "googleapis";
 import nodemailer from "nodemailer";
 
 /* --------------------------
-   MONTH HANDLING (UNCHANGED)
+   MONTH HANDLING
 --------------------------- */
 
 function getPreviousMonth() {
@@ -42,7 +42,6 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const sheets = google.sheets({ version: "v4", auth });
-const drive = google.drive({ version: "v3", auth });
 
 const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
 
@@ -73,33 +72,6 @@ async function safeFetchJson(url, headers) {
 }
 
 /* --------------------------
-   BYTE SAFE SPLITTER
---------------------------- */
-
-function splitByBytes(str, maxBytes) {
-  const chunks = [];
-  let current = "";
-  let currentBytes = 0;
-
-  for (const char of str) {
-    const charBytes = Buffer.byteLength(char, "utf8");
-
-    if (currentBytes + charBytes > maxBytes) {
-      chunks.push(current);
-      current = char;
-      currentBytes = charBytes;
-    } else {
-      current += char;
-      currentBytes += charBytes;
-    }
-  }
-
-  if (current) chunks.push(current);
-
-  return chunks;
-}
-
-/* --------------------------
    MAIN
 --------------------------- */
 
@@ -107,7 +79,7 @@ async function run() {
 
   await sheets.spreadsheets.values.clear({
     spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:G"
+    range: "Tickets_Raw!A:F"
   });
 
   await sheets.spreadsheets.values.update({
@@ -121,8 +93,7 @@ async function run() {
         "Requester Email",
         "Channel",
         "Subject",
-        "All Public Comments",
-        "Comment Body"
+        "All Public Comments"
       ]]
     }
   });
@@ -132,7 +103,6 @@ async function run() {
   ).toString("base64");
 
   let totalSaved = 0;
-  const MAX_BYTES = 48000;
 
   const EXCLUDED_CHANNELS = ["messaging", "native_messaging"];
 
@@ -196,34 +166,27 @@ async function run() {
           });
 
           const combined = formatted.join("\n\n---\n\n");
-          const chunks = splitByBytes(combined, MAX_BYTES);
 
-          for (let p = 0; p < chunks.length; p++) {
+          const safeCombined =
+            combined && combined.length > 49000
+              ? combined.slice(0, 49000) + "\n\n[Truncated]"
+              : combined;
 
-            const safeCombined =
-              combined && combined.length > 49000
-                ? combined.slice(0, 49000) + "\n\n[Truncated]"
-                : combined;
-
-            rows.push([
-              ticket_id,
-              created,
-              requester_email,
-              channel,
-              subject,
-              safeCombined,
-              chunks.length > 1
-                ? `Part ${p + 1}/${chunks.length}\n\n${chunks[p]}`
-                : chunks[p]
-            ]);
-          }
+          rows.push([
+            ticket_id,
+            created,
+            requester_email,
+            channel,
+            subject,
+            safeCombined
+          ]);
         })
       );
 
       if (rows.length > 0) {
         await sheets.spreadsheets.values.append({
           spreadsheetId: SYSTEM_SHEET_ID,
-          range: "Tickets_Raw!A:G",
+          range: "Tickets_Raw!A:F",
           valueInputOption: "USER_ENTERED",
           requestBody: { values: rows }
         });
@@ -252,7 +215,7 @@ async function run() {
 
   const source = await sheets.spreadsheets.values.get({
     spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:G"
+    range: "Tickets_Raw!A:F"
   });
 
   const values = source.data.values || [];
@@ -260,14 +223,12 @@ async function run() {
   const cleanedValues = values.filter((row, index) => {
     if (index === 0) return true;
 
-    const [id, created, email, channel, subject, allComments, commentBody] = row;
+    const [id, created, email, channel, subject, comments] = row;
 
-    const isMainEmpty =
-      !id && !created && !email && !channel && !subject && !allComments;
+    const isEmpty =
+      !id && !created && !email && !channel && !subject && !comments;
 
-    const hasOnlyG = isMainEmpty && commentBody;
-
-    return !hasOnlyG;
+    return !isEmpty;
   });
 
   await sheets.spreadsheets.values.update({
@@ -292,19 +253,14 @@ async function run() {
   /* EXPORT */
 
   const client = await auth.getClient();
-  const accessToken = (await client.getAccessToken()).token;
 
-  await new Promise(r => setTimeout(r, 2000)); // ✅ stability delay
-
-  const exportUrl =
-    `https://www.googleapis.com/drive/v3/files/${tempId}/export` +
-    `?mimeType=application/vnd.openxmlformats-officedocument.spreadsheetml.sheet`;
-
-  const res = await fetch(exportUrl, {
-    headers: { Authorization: `Bearer ${accessToken}` }
+  const res = await client.request({
+    url: `https://docs.google.com/spreadsheets/d/${tempId}/export`,
+    params: { format: "xlsx" },
+    responseType: "arraybuffer"
   });
 
-  const fileBuffer = Buffer.from(await res.arrayBuffer());
+  const fileBuffer = Buffer.from(res.data);
 
   /* EMAIL */
 
