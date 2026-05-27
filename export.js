@@ -28,18 +28,34 @@ function getMonthRange(monthStr) {
 const { start, end } = getMonthRange(monthStr);
 
 /* --------------------------
-   SAFE FETCH
+   SAFE FETCH WITH RETRY
 --------------------------- */
 
-async function safeFetchJson(url, headers) {
+async function safeFetchJson(url, headers, attempt = 1) {
   const res = await fetch(url, { headers });
 
+  // Handle HTTP 429
+  if (res.status === 429) {
+    const retryAfter = parseInt(res.headers.get("retry-after") || "60");
+    console.log(`Rate limited. Waiting ${retryAfter}s...`);
+    await new Promise(r => setTimeout(r, retryAfter * 1000));
+    return safeFetchJson(url, headers, attempt + 1);
+  }
+
+  const text = await res.text();
+
   if (!res.ok) {
-    const text = await res.text();
+    if (text.includes("allowed API requests per minute")) {
+      const wait = Math.min(60 * attempt, 300);
+      console.log(`Hard rate limit. Waiting ${wait}s...`);
+      await new Promise(r => setTimeout(r, wait * 1000));
+      return safeFetchJson(url, headers, attempt + 1);
+    }
+
     throw new Error(text);
   }
 
-  return res.json();
+  return JSON.parse(text);
 }
 
 /* --------------------------
@@ -58,10 +74,10 @@ async function run() {
 
   const EXCLUDED_CHANNELS = ["messaging", "native_messaging"];
 
-  let ticketMap = {}; // ticket_id → data
+  let ticketMap = {};
 
   /* --------------------------
-     FETCH EVENTS IN BULK
+     FETCH EVENTS
   --------------------------- */
 
   let startTime = Math.floor(start.getTime() / 1000);
@@ -73,7 +89,6 @@ async function run() {
     const data = await safeFetchJson(url, headers);
 
     const events = data.ticket_events || [];
-
     console.log(`Fetched ${events.length} events`);
 
     for (const event of events) {
@@ -81,7 +96,6 @@ async function run() {
       const ticket_id = event.ticket_id;
       if (!ticket_id) continue;
 
-      // Initialize ticket
       if (!ticketMap[ticket_id]) {
         ticketMap[ticket_id] = {
           ticket_id,
@@ -89,13 +103,14 @@ async function run() {
           subject: "",
           channel: "",
           requester_email: "",
+          requester_id: null,
           comments: []
         };
       }
 
       const ticket = ticketMap[ticket_id];
 
-      // Ticket creation event
+      // Ticket creation
       if (event.event_type === "Create") {
         ticket.created_at = event.created_at;
         ticket.subject = event.ticket?.subject || "";
@@ -104,13 +119,14 @@ async function run() {
           event.ticket?.requester?.email ||
           event.ticket?.via?.source?.from?.address ||
           "N/A";
+        ticket.requester_id = event.ticket?.requester_id;
       }
 
-      // Comment event
+      // Comment
       if (event.event_type === "Comment" && event.public) {
 
         const role =
-          event.author_id === event.ticket?.requester_id
+          event.author_id === ticket.requester_id
             ? "**Requester:**"
             : "**Agent:**";
 
@@ -120,9 +136,12 @@ async function run() {
       }
     }
 
-    // Stop when beyond end date
+    // Stop once past month
     const lastEvent = events[events.length - 1];
     if (!lastEvent || new Date(lastEvent.created_at) > end) break;
+
+    // Small delay to avoid rate spikes
+    await new Promise(r => setTimeout(r, 200));
 
     url = data.next_page;
   }
