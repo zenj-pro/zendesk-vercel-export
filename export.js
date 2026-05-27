@@ -36,6 +36,7 @@ async function safeFetchJson(url, headers) {
 
   if (response.status === 429) {
     const retry = parseInt(response.headers.get("retry-after") || "60");
+    console.log(`Rate limited. Retrying in ${retry}s`);
     await new Promise(r => setTimeout(r, retry * 1000));
     return safeFetchJson(url, headers);
   }
@@ -110,7 +111,9 @@ async function run() {
               { Authorization: `Basic ${authHeader}` }
             );
             publicComments = (commentsData.comments || []).filter(c => c.public);
-          } catch {}
+          } catch (e) {
+            console.log(`Failed to fetch comments for ticket ${ticket_id}`);
+          }
 
           const formatted = publicComments.map(c => {
             const role =
@@ -122,9 +125,10 @@ async function run() {
 
           const combined = formatted.join("\n\n---\n\n");
 
+          // ✅ SAFE LIMIT FOR EXCEL
           const safeCombined =
-            combined && combined.length > 49000
-              ? combined.slice(0, 49000) + "\n\n[Truncated]"
+            combined && combined.length > 30000
+              ? combined.slice(0, 30000) + "\n\n[Truncated]"
               : combined;
 
           const row = [
@@ -147,7 +151,7 @@ async function run() {
   console.log(`Month complete. Total rows: ${allRows.length}`);
 
   /* --------------------------
-     BUILD EXCEL DIRECTLY
+     BUILD EXCEL
   --------------------------- */
 
   const worksheet = XLSX.utils.aoa_to_sheet([
