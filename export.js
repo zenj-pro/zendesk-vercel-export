@@ -1,5 +1,4 @@
 import fetch from "node-fetch";
-import { google } from "googleapis";
 import nodemailer from "nodemailer";
 import XLSX from "xlsx";
 
@@ -29,27 +28,6 @@ function getMonthRange(monthStr) {
 const { start, end } = getMonthRange(monthStr);
 
 /* --------------------------
-   GOOGLE AUTH
---------------------------- */
-
-const creds = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT_JSON);
-
-const auth = new google.auth.GoogleAuth({
-  credentials: creds,
-  scopes: [
-    "https://www.googleapis.com/auth/spreadsheets"
-  ]
-});
-
-const sheets = google.sheets({ version: "v4", auth });
-
-const SYSTEM_SHEET_ID = process.env.GOOGLE_SHEET_ID;
-
-const RECIPIENTS = process.env.EMAIL_RECIPIENTS
-  ? process.env.EMAIL_RECIPIENTS.split(",")
-  : [];
-
-/* --------------------------
    SAFE FETCH
 --------------------------- */
 
@@ -77,34 +55,13 @@ async function safeFetchJson(url, headers) {
 
 async function run() {
 
-  await sheets.spreadsheets.values.clear({
-    spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:F"
-  });
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A1",
-    valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: [[
-        "Ticket ID",
-        "Created at",
-        "Requester Email",
-        "Channel",
-        "Subject",
-        "All Public Comments"
-      ]]
-    }
-  });
-
   const authHeader = Buffer.from(
     `${process.env.ZENDESK_EMAIL}:${process.env.ZENDESK_API_TOKEN}`
   ).toString("base64");
 
-  let totalSaved = 0;
-
   const EXCLUDED_CHANNELS = ["messaging", "native_messaging"];
+
+  let allRows = [];
 
   for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
@@ -131,8 +88,6 @@ async function run() {
 
       console.log(`Processing ${tickets.length} tickets`);
 
-      let rows = [];
-
       await Promise.all(
         tickets.map(async (ticket) => {
 
@@ -145,7 +100,7 @@ async function run() {
 
           const requester_email =
             ticket.via?.source?.from?.address ||
-            ticket.requester_id ||
+            ticket.requester?.email ||
             "N/A";
 
           let publicComments = [];
@@ -172,58 +127,34 @@ async function run() {
               ? combined.slice(0, 49000) + "\n\n[Truncated]"
               : combined;
 
-          rows.push([
+          const row = [
             ticket_id,
             created,
             requester_email,
             channel,
             subject,
             safeCombined
-          ]);
+          ];
+
+          allRows.push(row);
         })
       );
-
-      if (rows.length > 0) {
-        await sheets.spreadsheets.values.append({
-          spreadsheetId: SYSTEM_SHEET_ID,
-          range: "Tickets_Raw!A:F",
-          valueInputOption: "USER_ENTERED",
-          requestBody: { values: rows }
-        });
-
-        totalSaved += rows.length;
-        console.log(`Saved ${rows.length}, total: ${totalSaved}`);
-      }
 
       url = data.next_page;
     }
   }
 
-  console.log(`Month complete. Total rows: ${totalSaved}`);
+  console.log(`Month complete. Total rows: ${allRows.length}`);
 
   /* --------------------------
      BUILD EXCEL DIRECTLY
   --------------------------- */
 
-  const source = await sheets.spreadsheets.values.get({
-    spreadsheetId: SYSTEM_SHEET_ID,
-    range: "Tickets_Raw!A:F"
-  });
+  const worksheet = XLSX.utils.aoa_to_sheet([
+    ["Ticket ID", "Created at", "Requester Email", "Channel", "Subject", "All Public Comments"],
+    ...allRows
+  ]);
 
-  const values = source.data.values || [];
-
-  const cleanedValues = values.filter((row, index) => {
-    if (index === 0) return true;
-
-    const [id, created, email, channel, subject, comments] = row;
-
-    const isEmpty =
-      !id && !created && !email && !channel && !subject && !comments;
-
-    return !isEmpty;
-  });
-
-  const worksheet = XLSX.utils.aoa_to_sheet(cleanedValues);
   const workbook = XLSX.utils.book_new();
 
   XLSX.utils.book_append_sheet(
@@ -251,7 +182,7 @@ async function run() {
 
   await transporter.sendMail({
     from: process.env.GMAIL_SENDER,
-    to: RECIPIENTS,
+    to: process.env.EMAIL_RECIPIENTS,
     subject: `Zendesk Monthly Report - ${monthStr}`,
     text: "Attached is this month’s Zendesk export.",
     attachments: [{
