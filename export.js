@@ -28,31 +28,23 @@ function getMonthRange(monthStr) {
 const { start, end } = getMonthRange(monthStr);
 
 /* --------------------------
-   SAFE FETCH WITH RETRY
+   SAFE FETCH
 --------------------------- */
 
-async function safeFetchJson(url, headers, attempt = 1) {
-  const res = await fetch(url, { headers });
+async function safeFetchJson(url, headers) {
+  const response = await fetch(url, { headers });
 
-  // Handle HTTP 429
-  if (res.status === 429) {
-    const retryAfter = parseInt(res.headers.get("retry-after") || "60");
-    console.log(`Rate limited. Waiting ${retryAfter}s...`);
-    await new Promise(r => setTimeout(r, retryAfter * 1000));
-    return safeFetchJson(url, headers, attempt + 1);
+  if (response.status === 429) {
+    const retry = parseInt(response.headers.get("retry-after") || "60");
+    console.log(`Rate limited. Retrying in ${retry}s`);
+    await new Promise(r => setTimeout(r, retry * 1000));
+    return safeFetchJson(url, headers);
   }
 
-  const text = await res.text();
+  const text = await response.text();
 
-  if (!res.ok) {
-    if (text.includes("allowed API requests per minute")) {
-      const wait = Math.min(60 * attempt, 300);
-      console.log(`Hard rate limit. Waiting ${wait}s...`);
-      await new Promise(r => setTimeout(r, wait * 1000));
-      return safeFetchJson(url, headers, attempt + 1);
-    }
-
-    throw new Error(text);
+  if (!response.ok) {
+    throw new Error(`Zendesk API error: ${text}`);
   }
 
   return JSON.parse(text);
@@ -68,119 +60,101 @@ async function run() {
     `${process.env.ZENDESK_EMAIL}:${process.env.ZENDESK_API_TOKEN}`
   ).toString("base64");
 
-  const headers = {
-    Authorization: `Basic ${authHeader}`
-  };
-
   const EXCLUDED_CHANNELS = ["messaging", "native_messaging"];
-
-  let ticketMap = {};
-
-  /* --------------------------
-     FETCH EVENTS
-  --------------------------- */
-
-  let startTime = Math.floor(start.getTime() / 1000);
-
-  let url = `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/incremental/ticket_events.json?start_time=${startTime}`;
-
-  while (url) {
-
-    const data = await safeFetchJson(url, headers);
-
-    const events = data.ticket_events || [];
-    console.log(`Fetched ${events.length} events`);
-
-    for (const event of events) {
-
-      const ticket_id = event.ticket_id;
-      if (!ticket_id) continue;
-
-      if (!ticketMap[ticket_id]) {
-        ticketMap[ticket_id] = {
-          ticket_id,
-          created_at: null,
-          subject: "",
-          channel: "",
-          requester_email: "",
-          requester_id: null,
-          comments: []
-        };
-      }
-
-      const ticket = ticketMap[ticket_id];
-
-      // Ticket creation
-      if (event.event_type === "Create") {
-        ticket.created_at = event.created_at;
-        ticket.subject = event.ticket?.subject || "";
-        ticket.channel = event.ticket?.via?.channel || "";
-        ticket.requester_email =
-          event.ticket?.requester?.email ||
-          event.ticket?.via?.source?.from?.address ||
-          "N/A";
-        ticket.requester_id = event.ticket?.requester_id;
-      }
-
-      // Comment
-      if (event.event_type === "Comment" && event.public) {
-
-        const role =
-          event.author_id === ticket.requester_id
-            ? "**Requester:**"
-            : "**Agent:**";
-
-        const body = event.body || "";
-
-        ticket.comments.push(`${role} ${body}`);
-      }
-    }
-
-    // Stop once past month
-    const lastEvent = events[events.length - 1];
-    if (!lastEvent || new Date(lastEvent.created_at) > end) break;
-
-    // Small delay to avoid rate spikes
-    await new Promise(r => setTimeout(r, 200));
-
-    url = data.next_page;
-  }
-
-  /* --------------------------
-     BUILD ROWS
-  --------------------------- */
 
   let allRows = [];
 
-  for (const ticket_id in ticketMap) {
+  for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
 
-    const t = ticketMap[ticket_id];
+    const dateStr = d.toISOString().split("T")[0];
+    const nextDay = new Date(d);
+    nextDay.setDate(nextDay.getDate() + 1);
+    const nextDateStr = nextDay.toISOString().split("T")[0];
 
-    if (!t.created_at) continue;
+    console.log("Processing day:", dateStr);
 
-    const createdDate = new Date(t.created_at);
-    if (createdDate < start || createdDate >= end) continue;
+    let url =
+      `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
+      `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
+      `&sort_by=created_at&sort_order=asc`;
 
-    if (EXCLUDED_CHANNELS.includes(t.channel)) continue;
+    while (url) {
 
-    const combined = t.comments.join("\n\n---\n\n");
+      const data = await safeFetchJson(url, {
+        Authorization: `Basic ${authHeader}`
+      });
 
-    const safeCombined =
-      combined && combined.length > 30000
-        ? combined.slice(0, 30000) + "\n\n[Truncated]"
-        : combined;
+      const tickets = data.results || [];
+      if (tickets.length === 0) break;
 
-    allRows.push([
-      t.ticket_id,
-      t.created_at,
-      t.requester_email,
-      t.channel,
-      t.subject,
-      safeCombined
-    ]);
+      console.log(`Processing ${tickets.length} tickets`);
+
+      /* 🔥 CONTROLLED BATCHING FIX */
+      for (let i = 0; i < tickets.length; i += 5) {
+
+        const batch = tickets.slice(i, i + 5);
+
+        await Promise.all(
+          batch.map(async (ticket) => {
+
+            const channel = ticket.via?.channel || "";
+            if (EXCLUDED_CHANNELS.includes(channel)) return;
+
+            const ticket_id = ticket.id;
+            const created = ticket.created_at;
+            const subject = ticket.subject || "";
+
+            const requester_email =
+              ticket.via?.source?.from?.address ||
+              ticket.requester?.email ||
+              "N/A";
+
+            let publicComments = [];
+            try {
+              const commentsData = await safeFetchJson(
+                `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket_id}/comments.json`,
+                { Authorization: `Basic ${authHeader}` }
+              );
+              publicComments = (commentsData.comments || []).filter(c => c.public);
+            } catch (e) {
+              console.log(`Failed comments for ticket ${ticket_id}`);
+            }
+
+            const formatted = publicComments.map(c => {
+              const role =
+                c.author_id === ticket.requester_id
+                  ? "**Requester:**"
+                  : "**Agent:**";
+              return `${role} ${c.body}`;
+            });
+
+            const combined = formatted.join("\n\n---\n\n");
+
+            const safeCombined =
+              combined && combined.length > 30000
+                ? combined.slice(0, 30000) + "\n\n[Truncated]"
+                : combined;
+
+            allRows.push([
+              ticket_id,
+              created,
+              requester_email,
+              channel,
+              subject,
+              safeCombined
+            ]);
+          })
+        );
+
+        // small delay between batches
+        await new Promise(r => setTimeout(r, 500));
+      }
+
+      url = data.next_page;
+    }
   }
 
-  console.log(`Final tickets: ${allRows.length}`);
+  console.log(`Month complete. Total rows: ${allRows.length}`);
 
   /* --------------------------
      BUILD EXCEL
