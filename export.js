@@ -32,22 +32,14 @@ const { start, end } = getMonthRange(monthStr);
 --------------------------- */
 
 async function safeFetchJson(url, headers) {
-  const response = await fetch(url, { headers });
+  const res = await fetch(url, { headers });
 
-  if (response.status === 429) {
-    const retry = parseInt(response.headers.get("retry-after") || "60");
-    console.log(`Rate limited. Retrying in ${retry}s`);
-    await new Promise(r => setTimeout(r, retry * 1000));
-    return safeFetchJson(url, headers);
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(text);
   }
 
-  const text = await response.text();
-
-  if (!response.ok) {
-    throw new Error(`Zendesk API error: ${text}`);
-  }
-
-  return JSON.parse(text);
+  return res.json();
 }
 
 /* --------------------------
@@ -60,95 +52,116 @@ async function run() {
     `${process.env.ZENDESK_EMAIL}:${process.env.ZENDESK_API_TOKEN}`
   ).toString("base64");
 
+  const headers = {
+    Authorization: `Basic ${authHeader}`
+  };
+
   const EXCLUDED_CHANNELS = ["messaging", "native_messaging"];
+
+  let ticketMap = {}; // ticket_id → data
+
+  /* --------------------------
+     FETCH EVENTS IN BULK
+  --------------------------- */
+
+  let startTime = Math.floor(start.getTime() / 1000);
+
+  let url = `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/incremental/ticket_events.json?start_time=${startTime}`;
+
+  while (url) {
+
+    const data = await safeFetchJson(url, headers);
+
+    const events = data.ticket_events || [];
+
+    console.log(`Fetched ${events.length} events`);
+
+    for (const event of events) {
+
+      const ticket_id = event.ticket_id;
+      if (!ticket_id) continue;
+
+      // Initialize ticket
+      if (!ticketMap[ticket_id]) {
+        ticketMap[ticket_id] = {
+          ticket_id,
+          created_at: null,
+          subject: "",
+          channel: "",
+          requester_email: "",
+          comments: []
+        };
+      }
+
+      const ticket = ticketMap[ticket_id];
+
+      // Ticket creation event
+      if (event.event_type === "Create") {
+        ticket.created_at = event.created_at;
+        ticket.subject = event.ticket?.subject || "";
+        ticket.channel = event.ticket?.via?.channel || "";
+        ticket.requester_email =
+          event.ticket?.requester?.email ||
+          event.ticket?.via?.source?.from?.address ||
+          "N/A";
+      }
+
+      // Comment event
+      if (event.event_type === "Comment" && event.public) {
+
+        const role =
+          event.author_id === event.ticket?.requester_id
+            ? "**Requester:**"
+            : "**Agent:**";
+
+        const body = event.body || "";
+
+        ticket.comments.push(`${role} ${body}`);
+      }
+    }
+
+    // Stop when beyond end date
+    const lastEvent = events[events.length - 1];
+    if (!lastEvent || new Date(lastEvent.created_at) > end) break;
+
+    url = data.next_page;
+  }
+
+  /* --------------------------
+     BUILD ROWS
+  --------------------------- */
 
   let allRows = [];
 
-  for (let d = new Date(start); d < end; d.setDate(d.getDate() + 1)) {
+  for (const ticket_id in ticketMap) {
 
-    const dateStr = d.toISOString().split("T")[0];
-    const nextDay = new Date(d);
-    nextDay.setDate(nextDay.getDate() + 1);
-    const nextDateStr = nextDay.toISOString().split("T")[0];
+    const t = ticketMap[ticket_id];
 
-    console.log("Processing day:", dateStr);
+    if (!t.created_at) continue;
 
-    let url =
-      `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/search.json` +
-      `?query=type:ticket created>=${dateStr} created<${nextDateStr}` +
-      `&sort_by=created_at&sort_order=asc`;
+    const createdDate = new Date(t.created_at);
+    if (createdDate < start || createdDate >= end) continue;
 
-    while (url) {
+    if (EXCLUDED_CHANNELS.includes(t.channel)) continue;
 
-      const data = await safeFetchJson(url, {
-        Authorization: `Basic ${authHeader}`
-      });
+    const combined = t.comments.join("\n\n---\n\n");
 
-      const tickets = data.results || [];
-      if (tickets.length === 0) break;
+    const safeCombined =
+      combined && combined.length > 30000
+        ? combined.slice(0, 30000) + "\n\n[Truncated]"
+        : combined;
 
-      console.log(`Processing ${tickets.length} tickets`);
-
-      await Promise.all(
-        tickets.map(async (ticket) => {
-
-          const channel = ticket.via?.channel || "";
-          if (EXCLUDED_CHANNELS.includes(channel)) return;
-
-          const ticket_id = ticket.id;
-          const created = ticket.created_at;
-          const subject = ticket.subject || "";
-
-          const requester_email =
-            ticket.via?.source?.from?.address ||
-            ticket.requester?.email ||
-            "N/A";
-
-          let publicComments = [];
-          try {
-            const commentsData = await safeFetchJson(
-              `https://${process.env.ZENDESK_SUBDOMAIN}.zendesk.com/api/v2/tickets/${ticket_id}/comments.json`,
-              { Authorization: `Basic ${authHeader}` }
-            );
-            publicComments = (commentsData.comments || []).filter(c => c.public);
-          } catch (e) {
-            console.log(`Failed to fetch comments for ticket ${ticket_id}`);
-          }
-
-          const formatted = publicComments.map(c => {
-            const role =
-              c.author_id === ticket.requester_id
-                ? "**Requester:**"
-                : "**Agent:**";
-            return `${role} ${c.body}`;
-          });
-
-          const combined = formatted.join("\n\n---\n\n");
-
-          // ✅ SAFE LIMIT FOR EXCEL
-          const safeCombined =
-            combined && combined.length > 30000
-              ? combined.slice(0, 30000) + "\n\n[Truncated]"
-              : combined;
-
-          const row = [
-            ticket_id,
-            created,
-            requester_email,
-            channel,
-            subject,
-            safeCombined
-          ];
-
-          allRows.push(row);
-        })
-      );
-
-      url = data.next_page;
-    }
+    allRows.push([
+      t.ticket_id,
+      t.created_at,
+      t.requester_email,
+      t.channel,
+      t.subject,
+      safeCombined
+    ]);
   }
 
-  console.log(`Month complete. Total rows: ${allRows.length}`);
+  console.log(`Final tickets: ${allRows.length}`);
 
   /* --------------------------
      BUILD EXCEL
